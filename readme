@@ -1,1 +1,94 @@
-code here
+# Adaptive Memory Architecture
+
+## Overview
+This repository documents an adaptive memory system that learns new facts instantly while keeping a compact set of specialized computation modules. The design balances immediate recall, efficient routing, and long-term compression by combining an encoder, an associative memory, a router, and a dynamic mixture of experts governed by an explicit memory–parameter budget.
+
+## 1. Encoder $f_\theta$
+- **Input:** A fact $F$ such as `(apple, dropped_on, earth) → acceleration≈g`.
+- **Outputs:**
+  - **Key** $k = f_k(F) \in \mathbb{R}^d$ for retrieval and routing.
+  - **Value** $v = f_v(F)$ capturing structured payloads (constants, units, relations, uncertainty).
+- **Training:** Trained offline once for representation quality; kept frozen when new facts arrive.
+
+## 2. Associative Memory $\mathcal{M}$
+- Append-only store of entries $(k_i, v_i, \text{meta}_i)$.
+- **Write:** Append encoded pairs as instant learning without gradient updates.
+- **Read:** Perform similarity search (e.g., k-NN or attention) over keys to retrieve top-$K$ values, aggregating by similarity scores.
+- **Metadata:** Timestamps, provenance, trust, and usage statistics support later consolidation or pruning.
+
+## 3. Router $R$
+- Measures novelty $s = 1 - \max_i \text{cos}(k, k_i)$.
+- **Growth:** If $s > \tau_{\text{grow}}$, allocate additional capacity by spawning experts.
+- **Attachment:** Otherwise append the fact to existing memory and index under current experts.
+- **Expert Assignment:** Uses softmax gating (e.g., $g = \text{softmax}(Wk)$) or locality-sensitive hashing for fast routing.
+
+## 4. Dynamic Mixture of Experts $\{E_j\}$
+- Bank of small, mostly frozen modules (MLPs, capsules, or graph mini-nets) specializing in semantic regions.
+- **Growth Rule:** Spawn a new expert when novelty is high and current experts cannot meet an error threshold.
+- **Freezing:** Experts with stable usage are set to read-mostly and protected with elastic regularization.
+- **Role:** Compress repeated facts and perform derived computations (e.g., derive fall time from gravitational constant).
+
+## 5. Memory–Parameter Budgeter (Optimizer)
+- Optimize a Lagrangian balancing recall, parameter cost, memory footprint, and utility:
+  $$\mathcal{L} = \mathbb{E}_{F}[ -\log p(F \mid \mathcal{M}, \{E_j\}, \theta)] + \lambda_{\text{params}} \cdot \text{bits}(\theta, \{E_j\}) + \lambda_{\text{mem}} \cdot \text{bits}(\mathcal{M}) - \beta \cdot \text{utility}.$$ 
+- **Trade-offs:**
+  - $\lambda_{\text{params}}$ discourages unchecked expert growth.
+  - $\lambda_{\text{mem}}$ penalizes raw memory entries.
+  - Router chooses between storing more entries or growing experts to compress clusters of facts.
+- **Proxies:** Implement bit costs with parameter counts, key/value dimensions, or learned compression ratios.
+
+## Operational Paths
+### Write (Instant Learning)
+1. Encode fact $F$ to $(k, v)$.
+2. Compute novelty $s$.
+3. If $s \le \tau_{\text{grow}}$, append $(k, v)$ to memory and index under active experts.
+4. If $s > \tau_{\text{grow}}$, spawn a new expert before writing the fact.
+5. Update metadata (usage counts, recency).
+
+### Read (Recall and Reasoning)
+1. Encode query $Q$ to $q$.
+2. Router selects top experts.
+3. Perform top-$K$ memory lookup on $q$.
+4. Experts optionally compose values, enforce constraints, or derive consequences.
+5. Aggregate outputs with confidence estimates and return the result.
+
+## Structural Growth Strategies
+- **Capsule Experts:** Add capsules with pose vectors for subject–predicate–object relations as new relation families appear.
+- **Graph Mini-Nets:** Maintain tiny hypergraph modules that expand with new nodes/edges for novel concepts while freezing stable subgraphs.
+
+## Continual Stability
+- Associative memory is append-only, preventing overwrites.
+- Use continual-learning regularizers (EWC, Synaptic Intelligence) for expert weights.
+- Employ sparse routing to minimize interference and adapt via low-rank adapters when necessary.
+
+## Store vs. Grow Policy
+- Track retrieval error $e_{\text{retr}}$, parameter cost $c_{\text{params}}$, and memory cost $c_{\text{mem}}$.
+- **Decision Rule:**
+  - If $\lambda_{\text{mem}} c_{\text{mem}} < \lambda_{\text{params}} c_{\text{params}}$ for the expected error reduction $\Delta e$, prefer storing.
+  - When many similar entries accumulate and a compact expert reduces entropy beyond a threshold, spawn and train a new expert, optionally consolidating redundant entries.
+
+## Fact Representation
+- Normalize facts as tuples $(s, r, o, \text{attrs})$ with units and uncertainties.
+- Example: $(\text{apple}, \text{dropped\_on}, \text{earth}, \{ g: 9.81, \text{units}: \text{m/s}^2 \})$.
+- Train the encoder so that semantically equivalent expressions map to nearby keys.
+
+## Reference Implementation
+The `adaptive_memory` Python package contains a minimal, testable implementation of the architecture:
+
+- `encoder.FactEncoder` converts tokenized facts and queries into normalized key vectors using unigram and bigram hashing, while attaching trust-aware metadata to each record.
+- `memory.AssociativeMemory` stores `MemoryEntry` records append-only, maintains usage statistics, and surfaces best-match similarity for novelty estimation.
+- `router.Router` computes novelty against the live memory store and selects experts via softmax gating, exposing `grow_threshold` for capacity management.
+- `expert.Expert` and `expert.ExpertManager` represent dynamic experts, including centroid adaptation, trust-weighted aggregation, and lifecycle management helpers.
+- `optimizer.MemoryParameterBudgeter` evaluates the memory–parameter Lagrangian to guide growth decisions.
+- `system.AdaptiveMemorySystem` orchestrates the components to support `remember`, `recall`, and budgeting workflows while automatically spawning experts on high-novelty writes.
+
+The memory layer updates metadata such as `usage_count`, `last_access`, and per-entry `confidence` on every retrieval, enabling downstream policies (e.g., consolidation or pruning) to act on fresh statistics without additional bookkeeping.
+
+```python
+from adaptive_memory import AdaptiveMemorySystem
+
+system = AdaptiveMemorySystem()
+system.remember(["apple", "earth"], {"g": 9.81})
+answer = system.recall(["apple", "drop"], top_k=3)
+```
+
